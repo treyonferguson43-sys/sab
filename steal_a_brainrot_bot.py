@@ -906,15 +906,49 @@ async def get_member(guild, user):
         return None
 
 def find_role(guild, query):
-    if not query:
+    """Find role by ID, exact name, partial name, or common short forms."""
+    if not query or not guild:
         return None
     query = query.strip()
+    # Strip role mention
+    if query.startswith("<@&") and query.endswith(">"):
+        query = query[3:-1]
     if query.isdigit():
-        return guild.get_role(int(query))
-    role = discord.utils.find(lambda r: r.name.lower() == query.lower(), guild.roles)
+        role = guild.get_role(int(query))
+        if role:
+            return role
+    q = query.lower()
+    # 1) Exact name
+    role = discord.utils.find(lambda r: r.name.lower() == q, guild.roles)
     if role:
         return role
-    return discord.utils.find(lambda r: query.lower() in r.name.lower(), guild.roles)
+    # 2) Exact after stripping brackets/prefixes like "[ H ] • "
+    def clean(n):
+        n = n.lower()
+        if "•" in n:
+            n = n.split("•")[-1].strip()
+        n = n.replace("[", " ").replace("]", " ")
+        return " ".join(n.split())
+    role = discord.utils.find(lambda r: clean(r.name) == q, guild.roles)
+    if role:
+        return role
+    # 3) Substring match (prefer shortest role name = best match)
+    matches = [r for r in guild.roles if q in r.name.lower() or q in clean(r.name)]
+    if matches:
+        matches.sort(key=lambda r: len(r.name))
+        return matches[0]
+    # 4) All words present (order independent) e.g. "head recruitment" -> "Head of Recruitment"
+    words = [w for w in q.replace("-", " ").split() if w and w not in ("of", "the", "and")]
+    if words:
+        candidates = []
+        for r in guild.roles:
+            rn = clean(r.name)
+            if all(w in rn for w in words):
+                candidates.append(r)
+        if candidates:
+            candidates.sort(key=lambda r: len(r.name))
+            return candidates[0]
+    return None
 
 CMD_FAIL_MSG = "I'm sorry this command you tried to use is not going to work with your perm or u just did the command wrong — STEAL A BRAINROT"
 
@@ -1049,21 +1083,32 @@ async def filter_bad_content(message):
     return False
 
 # ==================== AUTO PANEL POSTER ====================
+async def _clear_bot_messages(channel, limit=15):
+    """Remove previous panel messages from this bot so panels reset cleanly."""
+    try:
+        def is_me(m):
+            return m.author.id == bot.user.id
+        await channel.purge(limit=limit, check=is_me)
+    except Exception as e:
+        print(f"Could not clear old panels in {getattr(channel, 'id', '?')}: {e}")
+
 async def post_panels():
-    """Post / refresh all service panels on startup."""
+    """Post / refresh all service panels on startup (clears old ones first)."""
     # Support panel
     try:
         ch = bot.get_channel(PANEL_CHANNEL_SUPPORT) or await bot.fetch_channel(PANEL_CHANNEL_SUPPORT)
+        await _clear_bot_messages(ch)
         embed = discord.Embed(
             title="✦ Server Services — STEAL A BRAINROT",
             description=(
+                "**SERVICES**\n"
                 "Use the menu below to open a private ticket.\n\n"
                 "🛡️ **Contact Staff** — General support\n"
                 "🚨 **Scammer Report** — Report scammers\n"
                 "🎁 **Claim Reward** — Claim giveaway prizes\n"
-                "📢 **Promote / Ads** — Advertise here\n"
+                "📢 **Promote / Ads** — Paid ads / promotions\n"
                 "💰 **Pay for Rolls** — Purchase rolls\n\n"
-                "*Powered by STEAL A BRAINROT*"
+                "*STEAL A BRAINROT*"
             ),
             color=THEME_COLOR
         )
@@ -1076,6 +1121,7 @@ async def post_panels():
     # Index panel
     try:
         ch = bot.get_channel(PANEL_CHANNEL_INDEX) or await bot.fetch_channel(PANEL_CHANNEL_INDEX)
+        await _clear_bot_messages(ch)
         embed = discord.Embed(
             title="✦ Index Department — STEAL A BRAINROT",
             description=(
@@ -1100,16 +1146,18 @@ async def post_panels():
     # Middleman panel
     try:
         ch = bot.get_channel(PANEL_CHANNEL_MM) or await bot.fetch_channel(PANEL_CHANNEL_MM)
+        await _clear_bot_messages(ch)
         embed = discord.Embed(
-            title="✦ MiddleMan Services — STEAL A BRAINROT",
+            title="✦ Middleman (MM) — STEAL A BRAINROT",
             description=(
-                "Select a trade service below.\n\n"
+                "**SERVICES**\n"
+                "Middleman (MM) — secure trade service\n\n"
                 "• **Cross Trades** 🟡\n"
                 "• **OG Trades** 🥇\n"
                 "• **1B+ Trades** 🥈\n"
                 "• **500M Trades** 🥉\n"
                 "• **0-250M Trades** ✅\n\n"
-                "*Powered by STEAL A BRAINROT*"
+                "*STEAL A BRAINROT*"
             ),
             color=THEME_COLOR
         )
@@ -1122,6 +1170,7 @@ async def post_panels():
     # Staff / Applications panel
     try:
         ch = bot.get_channel(PANEL_CHANNEL_STAFF) or await bot.fetch_channel(PANEL_CHANNEL_STAFF)
+        await _clear_bot_messages(ch)
         embed = discord.Embed(
             title="✦ Staff & Team Opportunities — STEAL A BRAINROT",
             description=(
@@ -1256,7 +1305,32 @@ async def ping(ctx):
 
 @bot.command()
 async def help(ctx):
-    emb = discord.Embed(title=f"✦ {BRAND_NAME} Help", description=f"**Prefix:** `{PREFIX}`\n\n**Everyone:** `+userinfo` `+serverinfo` `+snipe` `+ping` `+help`\n**Staff:** `+warn` `+tempmute` `+unmute` `+sanctions` `+clear` `+lock` `+unlock` `+addrole` `+delrole` `+derank`\n**High Staff:** `+banlist` `+blist` `+modstats`\n**Special:** `+ban` `+unban` `+kick` `+bl` `+unbl`\n**Tickets:** `+claim` `+close` `+rename` `+add` `+remove`", color=THEME_COLOR)
+    emb = discord.Embed(
+        title=f"✦ {BRAND_NAME} Help",
+        description=(
+            f"**Prefix:** `{PREFIX}`\n"
+            "Higher perm can use lower perm commands.\n\n"
+            "**Everyone**\n"
+            "`+help` `+ping` `+userinfo` `+serverinfo` `+snipe`\n\n"
+            "**Perm 1**\n"
+            "`+warn` `+tempmute` `+unmute` `+mutelist` `+sanctions` `+perms`\n\n"
+            "**Perm 2**\n"
+            "`+del sanction`\n\n"
+            "**Perm 3**\n"
+            "`+clearwarns`\n\n"
+            "**Perm 4**\n"
+            "`+clear` `+lock` `+unlock` `+derank` `+addrole` `+delrole`\n\n"
+            "**Perm 5**\n"
+            "`+banlist` `+baninfo` `+blist` `+linkalt`\n\n"
+            "**Perm 6**\n"
+            "`+temprole` `+modstats` `+syncroles` `+create` `+changeperm`\n\n"
+            "**Special Users only**\n"
+            "`+ban` `+unban` `+kick` `+bl` `+unbl`\n\n"
+            "**Tickets (staff)**\n"
+            "`+claim` `+close` `+rename` `+add` `+remove` `+commands`"
+        ),
+        color=THEME_COLOR
+    )
     emb.set_footer(text=FOOTER_TEXT)
     await ctx.send(embed=emb)
 
@@ -1301,7 +1375,7 @@ async def sanctions(ctx, target: str = None):
 @bot.command()
 async def warn(ctx, *, args=None):
     if not has_perm(ctx.author, get_cmd_perm("warn")):
-        return
+        return await cmd_fail(ctx)
     user = None
     reason = "No reason provided"
     if ctx.message.mentions:
@@ -1311,6 +1385,10 @@ async def warn(ctx, *, args=None):
             for m in ctx.message.mentions:
                 reason = reason.replace(f"<@{m.id}>", "").replace(f"<@!{m.id}>", "")
             reason = reason.strip() or "No reason provided"
+    elif ctx.message.reference:
+        user = await get_target(ctx, None)
+        if args:
+            reason = args.strip() or "No reason provided"
     elif args:
         parts = args.split(None, 1)
         user = await get_target(ctx, parts[0])
@@ -1329,7 +1407,7 @@ async def warn(ctx, *, args=None):
 @bot.command()
 async def tempmute(ctx, *, args=None):
     if not has_perm(ctx.author, get_cmd_perm("tempmute")):
-        return
+        return await cmd_fail(ctx)
     if not args:
         return await cmd_usage(ctx, "`+tempmute <@member> <duration> [reason]`")
     user = None
@@ -1366,10 +1444,16 @@ async def tempmute(ctx, *, args=None):
         await ctx.send(f"Failed: {e}")
 
 @bot.command()
-async def unmute(ctx, target=None):
+async def unmute(ctx, *, target: str = None):
     if not has_perm(ctx.author, get_cmd_perm("unmute")):
-        return
-    user = await get_target(ctx, target)
+        return await cmd_fail(ctx)
+    user = None
+    if ctx.message.mentions:
+        user = ctx.message.mentions[0]
+    elif ctx.message.reference:
+        user = await get_target(ctx, None)
+    elif target:
+        user = await get_target(ctx, target)
     if not user:
         return await cmd_usage(ctx, "`+unmute <@member>`")
     member = await get_member(ctx.guild, user)
@@ -1384,15 +1468,54 @@ async def unmute(ctx, target=None):
         await ctx.send(f"Failed: {e}")
 
 @bot.command()
-async def clear(ctx, amount: int = 10):
+async def clear(ctx, *, args: str = None):
+    """+clear [amount] [@member]
+    Examples:
+      +clear
+      +clear 20
+      +clear @user
+      +clear 50 @user
+    """
     if not has_perm(ctx.author, get_cmd_perm("clear")):
-        return
+        return await cmd_fail(ctx)
+
+    amount = 10
+    target_user = None
+
+    # Prefer mentions
+    if ctx.message.mentions:
+        target_user = ctx.message.mentions[0]
+
+    if args:
+        tokens = args.split()
+        # Find a number for amount
+        for tok in tokens:
+            if tok.isdigit():
+                amount = int(tok)
+                break
+        # If no mention yet, try resolve first non-digit token as user
+        if target_user is None:
+            for tok in tokens:
+                if not tok.isdigit() and not tok.startswith("<@"):
+                    target_user = await get_target(ctx, tok)
+                    if target_user:
+                        break
+
     if amount < 1 or amount > 100:
-        return await ctx.send("Amount 1-100.")
+        return await ctx.send("Amount must be between 1 and 100.")
+
     clearing_channels.add(ctx.channel.id)
     try:
-        deleted = await ctx.channel.purge(limit=amount + 1)
-        msg = await ctx.send(embed=discord.Embed(description=f"Deleted **{len(deleted)-1}** messages.", color=THEME_COLOR))
+        def check(m):
+            if target_user:
+                return m.author.id == target_user.id
+            return True
+        deleted = await ctx.channel.purge(limit=amount + 1, check=check)
+        count = max(0, len(deleted) - 1)
+        desc = f"Deleted **{count}** message(s)."
+        if target_user:
+            desc = f"Deleted **{count}** message(s) from {target_user.mention}."
+        msg = await ctx.send(embed=discord.Embed(description=desc, color=THEME_COLOR))
         await msg.delete(delay=3)
     except Exception as e:
         await ctx.send(f"Failed: {e}")
@@ -1402,7 +1525,7 @@ async def clear(ctx, amount: int = 10):
 @bot.command()
 async def lock(ctx):
     if not has_perm(ctx.author, get_cmd_perm("lock")):
-        return
+        return await cmd_fail(ctx)
     try:
         overwrite = ctx.channel.overwrites_for(ctx.guild.default_role)
         overwrite.send_messages = False
@@ -1414,7 +1537,7 @@ async def lock(ctx):
 @bot.command()
 async def unlock(ctx):
     if not has_perm(ctx.author, get_cmd_perm("unlock")):
-        return
+        return await cmd_fail(ctx)
     try:
         overwrite = ctx.channel.overwrites_for(ctx.guild.default_role)
         overwrite.send_messages = None
@@ -1425,74 +1548,140 @@ async def unlock(ctx):
 
 @bot.command()
 async def addrole(ctx, *, args=None):
+    """+addrole [user] <role>
+    Examples:
+      +addrole head of recruitment     (adds to yourself)
+      +addrole @user Moderator
+      +addrole Moderator
+    """
     if not has_perm(ctx.author, get_cmd_perm("addrole")) and not has_role_manage_extra(ctx.author):
-        return
-    if not args:
         return await cmd_fail(ctx)
+    if not args:
+        return await cmd_usage(ctx, "`+addrole [@member] <role>`")
+
     user = None
     role_name = None
+
     if ctx.message.mentions:
         user = ctx.message.mentions[0]
         role_name = args
         for m in ctx.message.mentions:
             role_name = role_name.replace(f"<@{m.id}>", "").replace(f"<@!{m.id}>", "")
         role_name = role_name.strip()
-    else:
-        parts = args.split(None, 1)
-        user = ctx.author
+    elif ctx.message.reference:
+        user = await get_target(ctx, None)
         role_name = args.strip()
+    else:
+        # Try first token as user ID, otherwise whole string is role (self)
+        parts = args.split(None, 1)
+        if parts[0].isdigit() and len(parts[0]) >= 15 and ctx.guild.get_member(int(parts[0])):
+            user = await get_target(ctx, parts[0])
+            role_name = parts[1] if len(parts) > 1 else None
+        else:
+            user = ctx.author
+            role_name = args.strip()
+
     if not user or not role_name:
-        return await cmd_fail(ctx)
+        return await cmd_usage(ctx, "`+addrole [@member] <role>`")
+
     member = await get_member(ctx.guild, user)
+    if not member:
+        return await ctx.send("Could not find that member.")
+
     role = find_role(ctx.guild, role_name)
-    if not member or not role:
-        return await cmd_fail(ctx)
+    if not role:
+        return await ctx.send(f"Could not find a role matching **{role_name}**.")
+
+    # Hierarchy checks
     if role >= ctx.author.top_role and str(ctx.author.id) not in SPECIAL_USERS:
-        return
+        return await ctx.send("You can't assign a role equal or higher than your top role.")
+    if role >= ctx.guild.me.top_role:
+        return await ctx.send("My role must be above that role to assign it.")
+
     if role in member.roles:
         return await ctx.send(f"{member.mention} already has {role.mention}.")
+
     try:
-        await member.add_roles(role)
-        await ctx.send("1 role was added to 1 member")
+        await member.add_roles(role, reason=f"addrole by {ctx.author}")
+        await ctx.send(f"1 role was added to 1 member")
+    except discord.Forbidden:
+        await ctx.send("I don't have permission to add that role.")
     except Exception as e:
         await ctx.send(f"Failed: {e}")
+
 
 @bot.command()
 async def delrole(ctx, *, args=None):
+    """+delrole [user] <role>
+    Examples:
+      +delrole head of recruitment
+      +delrole @user Moderator
+    """
     if not has_perm(ctx.author, get_cmd_perm("delrole")) and not has_role_manage_extra(ctx.author):
-        return
+        return await cmd_fail(ctx)
     if not args:
-        return await cmd_usage(ctx, "`+delrole <@member> <role>`")
+        return await cmd_usage(ctx, "`+delrole [@member] <role>`")
+
     user = None
     role_name = None
+
     if ctx.message.mentions:
         user = ctx.message.mentions[0]
         role_name = args
         for m in ctx.message.mentions:
             role_name = role_name.replace(f"<@{m.id}>", "").replace(f"<@!{m.id}>", "")
         role_name = role_name.strip()
-    else:
-        user = ctx.author
+    elif ctx.message.reference:
+        user = await get_target(ctx, None)
         role_name = args.strip()
+    else:
+        parts = args.split(None, 1)
+        if parts[0].isdigit() and len(parts[0]) >= 15 and ctx.guild.get_member(int(parts[0])):
+            user = await get_target(ctx, parts[0])
+            role_name = parts[1] if len(parts) > 1 else None
+        else:
+            user = ctx.author
+            role_name = args.strip()
+
     if not user or not role_name:
-        return await cmd_usage(ctx, "`+delrole <@member> <role>`")
+        return await cmd_usage(ctx, "`+delrole [@member] <role>`")
+
     member = await get_member(ctx.guild, user)
+    if not member:
+        return await ctx.send("Could not find that member.")
+
     role = find_role(ctx.guild, role_name)
-    if not member or not role:
-        return await cmd_usage(ctx, "`+delrole <@member> <role>`")
+    if not role:
+        return await ctx.send(f"Could not find a role matching **{role_name}**.")
+
+    if role >= ctx.author.top_role and str(ctx.author.id) not in SPECIAL_USERS:
+        return await ctx.send("You can't manage a role equal or higher than your top role.")
+    if role >= ctx.guild.me.top_role:
+        return await ctx.send("My role must be above that role to remove it.")
+
     if role not in member.roles:
         return await ctx.send(f"{member.mention} does not have {role.mention}.")
+
     try:
-        await member.remove_roles(role)
+        await member.remove_roles(role, reason=f"delrole by {ctx.author}")
         await ctx.send("1 role was successfully removed from 1 member")
+    except discord.Forbidden:
+        await ctx.send("I don't have permission to remove that role.")
     except Exception as e:
         await ctx.send(f"Failed: {e}")
 
+
 @bot.command()
-async def derank(ctx, target=None):
+async def derank(ctx, *, target: str = None):
     if not has_perm(ctx.author, get_cmd_perm("derank")):
-        return
-    user = await get_target(ctx, target)
+        return await cmd_fail(ctx)
+    user = None
+    if ctx.message.mentions:
+        user = ctx.message.mentions[0]
+    elif ctx.message.reference:
+        user = await get_target(ctx, None)
+    elif target:
+        user = await get_target(ctx, target)
     if not user:
         return await cmd_usage(ctx, "`+derank <@member>`")
     member = await get_member(ctx.guild, user)
@@ -1537,6 +1726,287 @@ async def serverinfo(ctx):
     await ctx.send(embed=emb)
 
 # Special commands
+
+@bot.command()
+async def clearwarns(ctx, *, target: str = None):
+    if not has_perm(ctx.author, get_cmd_perm("clearwarns")):
+        return await cmd_fail(ctx)
+    user = None
+    if ctx.message.mentions:
+        user = ctx.message.mentions[0]
+    elif ctx.message.reference:
+        user = await get_target(ctx, None)
+    elif target:
+        user = await get_target(ctx, target)
+    if not user:
+        return await cmd_usage(ctx, "`+clearwarns <@member>`")
+    target_member = await get_member(ctx.guild, user)
+    if target_member and not can_moderate(ctx.author, target_member):
+        return await ctx.send("You can't clear warns of someone with equal or higher rank.")
+    uid = str(user.id)
+    count = len(sanctions_data.get(uid, []))
+    sanctions_data[uid] = []
+    save_sanctions()
+    emb = discord.Embed(title=f"✦ Clear Warns — {BRAND_NAME}", description=f"Cleared **{count}** sanction(s) from {user.mention}", color=THEME_COLOR)
+    emb.set_footer(text=FOOTER_TEXT)
+    await ctx.send(embed=emb)
+
+@bot.command(name="del")
+async def del_sanction(ctx, action: str = None, *, rest: str = None):
+    if action != "sanction":
+        return
+    if not has_perm(ctx.author, get_cmd_perm("del")):
+        return await cmd_fail(ctx)
+    user = None
+    number = None
+    if ctx.message.mentions:
+        user = ctx.message.mentions[0]
+    if rest:
+        tokens = rest.split()
+        for tok in tokens:
+            if tok.isdigit() and user is None and len(tok) >= 15:
+                user = await get_target(ctx, tok)
+            elif tok.isdigit():
+                number = tok
+    if user is None and ctx.message.reference:
+        user = await get_target(ctx, None)
+    if not user or not number:
+        return await cmd_usage(ctx, "`+del sanction <@member> <number>`")
+    uid = str(user.id)
+    lst = sanctions_data.get(uid, [])
+    if not lst:
+        return await cmd_fail(ctx)
+    ordered = _sort_sanctions_newest_first(lst)
+    num = int(number)
+    if num < 1 or num > len(ordered):
+        return await cmd_usage(ctx, "`+del sanction <@member> <number>`")
+    deleted = ordered[num - 1]
+    sanctions_data[uid] = [s for s in lst if s is not deleted]
+    save_sanctions()
+    emb = discord.Embed(title=f"✦ Del Sanction — {BRAND_NAME}", description=f"Deleted: **{deleted.get('date','?')}**: {deleted.get('reason','')}", color=THEME_COLOR)
+    emb.set_footer(text=FOOTER_TEXT)
+    await ctx.send(embed=emb)
+
+@bot.command()
+async def mutelist(ctx):
+    if not has_perm(ctx.author, get_cmd_perm("mutelist")):
+        return await cmd_fail(ctx)
+    muted = [m for m in ctx.guild.members if m.timed_out_until and m.timed_out_until > datetime.now(timezone.utc)]
+    if not muted:
+        return await empty_result(ctx, "No one is currently muted.")
+    lines = [f"{m.mention} — until {discord.utils.format_dt(m.timed_out_until, 'R')}" for m in muted[:25]]
+    emb = discord.Embed(title=f"✦ Mute List — {BRAND_NAME}", description="\n".join(lines), color=THEME_COLOR)
+    emb.set_footer(text=f"{FOOTER_TEXT}  •  {len(muted)} muted")
+    await ctx.send(embed=emb)
+
+@bot.command()
+async def banlist(ctx):
+    if not has_perm(ctx.author, get_cmd_perm("banlist")):
+        return await cmd_fail(ctx)
+    try:
+        bans = [entry async for entry in ctx.guild.bans(limit=50)]
+    except Exception as e:
+        return await ctx.send(f"Failed: {e}")
+    if not bans:
+        return await empty_result(ctx, "There are no banned users.")
+    lines = []
+    for entry in bans[:40]:
+        reason = entry.reason or "No reason"
+        if len(reason) > 60:
+            reason = reason[:57] + "..."
+        lines.append(f"**{entry.user}** (`{entry.user.id}`)\n↳ {reason}")
+    emb = discord.Embed(title=f"✦ Ban List — {BRAND_NAME}", description="\n\n".join(lines), color=THEME_COLOR)
+    emb.set_footer(text=FOOTER_TEXT)
+    await ctx.send(embed=emb)
+
+@bot.command()
+async def baninfo(ctx, *, target: str = None):
+    if not has_perm(ctx.author, get_cmd_perm("baninfo")):
+        return await cmd_fail(ctx)
+    user = None
+    if ctx.message.mentions:
+        user = ctx.message.mentions[0]
+    elif target:
+        user = await get_target(ctx, target)
+    if not user:
+        return await cmd_usage(ctx, "`+baninfo <@member|id>`")
+    try:
+        ban_entry = await ctx.guild.fetch_ban(user)
+    except discord.NotFound:
+        return await ctx.send(f"**{user}** is not banned.")
+    except Exception as e:
+        return await ctx.send(f"Failed: {e}")
+    emb = discord.Embed(title=f"✦ Ban Info — {BRAND_NAME}", color=THEME_COLOR)
+    emb.set_author(name=str(user), icon_url=user.display_avatar.url)
+    emb.add_field(name="User", value=f"{user} (`{user.id}`)", inline=False)
+    emb.add_field(name="Reason", value=ban_entry.reason or "No reason", inline=False)
+    emb.set_footer(text=FOOTER_TEXT)
+    await ctx.send(embed=emb)
+
+@bot.command()
+async def modstats(ctx):
+    if not has_perm(ctx.author, get_cmd_perm("modstats")):
+        return await cmd_fail(ctx)
+    counts = {}
+    for uid, entries in sanctions_data.items():
+        for s in entries:
+            mid = str(s.get("moderator", "0"))
+            if mid and mid != "0":
+                counts[mid] = counts.get(mid, 0) + 1
+    if not counts:
+        return await ctx.send("No moderation actions recorded yet.")
+    sorted_mods = sorted(counts.items(), key=lambda x: x[1], reverse=True)[:25]
+    lines = [f"**{i}.** <@{mid}> — `{cnt}` actions" for i, (mid, cnt) in enumerate(sorted_mods, 1)]
+    emb = discord.Embed(title=f"✦ Moderator Statistics — {BRAND_NAME}", description="\n".join(lines), color=THEME_COLOR)
+    emb.set_footer(text=FOOTER_TEXT)
+    await ctx.send(embed=emb)
+
+@bot.command()
+async def syncroles(ctx):
+    if not has_perm(ctx.author, get_cmd_perm("syncroles")) and str(ctx.author.id) not in SPECIAL_USERS:
+        return await cmd_fail(ctx)
+    cache = resolve_role_ids(ctx.guild, force=True)
+    lines = []
+    for level in sorted(cache.keys()):
+        roles = [ctx.guild.get_role(rid).mention for rid in cache[level] if ctx.guild.get_role(rid)]
+        lines.append(f"**▸ Perm {level}:** {' '.join(roles) if roles else '*none*'}")
+    emb = discord.Embed(title=f"✦ Roles Synced — {BRAND_NAME}", description="\n".join(lines) or "No roles matched.", color=THEME_COLOR)
+    emb.set_footer(text=FOOTER_TEXT)
+    await ctx.send(embed=emb)
+
+@bot.command()
+async def temprole(ctx, *, args: str = None):
+    if not has_perm(ctx.author, get_cmd_perm("temprole")):
+        return await cmd_fail(ctx)
+    if not args:
+        return await cmd_usage(ctx, "`+temprole <@member> <duration> <role>` (e.g. 1h)")
+    user = None
+    rest = args
+    if ctx.message.mentions:
+        user = ctx.message.mentions[0]
+        for m in ctx.message.mentions:
+            rest = rest.replace(f"<@{m.id}>", "").replace(f"<@!{m.id}>", "")
+    tokens = rest.strip().split()
+    if user is None and tokens and tokens[0].isdigit() and len(tokens[0]) >= 15:
+        user = await get_target(ctx, tokens[0])
+        tokens = tokens[1:]
+    duration = None
+    duration_idx = None
+    for i, tok in enumerate(tokens):
+        if parse_duration(tok):
+            duration = tok
+            duration_idx = i
+            break
+    if duration is None or user is None:
+        return await cmd_usage(ctx, "`+temprole <@member> <duration> <role>`")
+    role_name = " ".join(tokens[:duration_idx] + tokens[duration_idx+1:]).strip()
+    if not role_name:
+        return await cmd_usage(ctx, "`+temprole <@member> <duration> <role>`")
+    delta = parse_duration(duration)
+    member = await get_member(ctx.guild, user)
+    role = find_role(ctx.guild, role_name)
+    if not member or not role or not delta:
+        return await cmd_usage(ctx, "`+temprole <@member> <duration> <role>`")
+    if role >= ctx.author.top_role and str(ctx.author.id) not in SPECIAL_USERS:
+        return await cmd_fail(ctx)
+    try:
+        if role not in member.roles:
+            await member.add_roles(role, reason=f"Temp role {duration} by {ctx.author}")
+        ends_at = datetime.now(timezone.utc) + delta
+        schedule_temprole(ctx.guild.id, member.id, role.id, ends_at)
+        emb = discord.Embed(title=f"✦ Temp Role — {BRAND_NAME}", description=f"Gave **{role.name}** to {member.mention} for **{duration}**\nRemoves {discord.utils.format_dt(ends_at, 'R')}", color=THEME_COLOR)
+        emb.set_footer(text=FOOTER_TEXT)
+        await ctx.send(embed=emb)
+    except Exception as e:
+        await ctx.send(f"Failed: {e}")
+
+@bot.command()
+async def create(ctx, emoji: str = None, *, name: str = None):
+    if not has_perm(ctx.author, get_cmd_perm("create")):
+        return await cmd_fail(ctx)
+    if emoji and not name:
+        name = emoji
+        emoji = None
+    if not name:
+        return await cmd_usage(ctx, "`+create [emoji] <name>`")
+    role_name = f"{emoji} {name}".strip() if emoji else name.strip()
+    existing = discord.utils.find(lambda r: r.name.lower() == role_name.lower(), ctx.guild.roles)
+    if existing:
+        return await ctx.send(f"A role named **{role_name}** already exists.")
+    try:
+        new_role = await ctx.guild.create_role(name=role_name, reason=f"Created by {ctx.author}")
+        await ctx.send(f"Successfully created role **{new_role.name}**")
+    except Exception as e:
+        await ctx.send(f"Failed: {e}")
+
+@bot.command()
+async def linkalt(ctx, *, args: str = None):
+    if not has_perm(ctx.author, get_cmd_perm("linkalt")):
+        return await cmd_fail(ctx)
+    if not args:
+        return await ctx.send("Usage: `+linkalt <main> <alt>`")
+    main_user = alt_user = None
+    mentions = list(ctx.message.mentions)
+    if len(mentions) >= 2:
+        main_user, alt_user = mentions[0], mentions[1]
+    else:
+        parts = args.split(None, 1)
+        if len(parts) >= 2:
+            main_user = await get_target(ctx, parts[0])
+            alt_user = await get_target(ctx, parts[1])
+    if not main_user or not alt_user or main_user.id == alt_user.id:
+        return await cmd_fail(ctx)
+    main_id, alt_id = str(main_user.id), str(alt_user.id)
+    if alt_id not in blacklist:
+        blacklist.append(alt_id)
+        save_blacklist()
+    if main_id not in linked_alts:
+        linked_alts[main_id] = []
+    if alt_id not in linked_alts[main_id]:
+        linked_alts[main_id].append(alt_id)
+        save_linked_alts()
+    try:
+        await ctx.guild.ban(alt_user, reason=f"Linked alt of {main_id}")
+    except Exception:
+        pass
+    if main_id not in blacklist:
+        blacklist.append(main_id)
+        save_blacklist()
+    emb = discord.Embed(title=f"✦ Link Alt — {BRAND_NAME}", description=f"Linked **{alt_user}** as alt of **{main_user}** and blacklisted.", color=THEME_COLOR)
+    emb.set_footer(text=FOOTER_TEXT)
+    await ctx.send(embed=emb)
+
+@bot.command()
+async def changeperm(ctx, command: str = None, level: str = None):
+    if not has_perm(ctx.author, get_cmd_perm("changeperm")):
+        return await cmd_fail(ctx)
+    if not command or level is None:
+        return await ctx.send("Usage: `+changeperm <command> <level|none>`")
+    cmd = command.lower().strip()
+    if level.lower() in ("none", "off", "disable"):
+        command_overrides[cmd] = "none"
+        save_command_perms()
+        return await ctx.send(f"Permission for `{cmd}` set to **none**.")
+    try:
+        lvl = int(level)
+        if lvl < 0 or lvl > 6:
+            return await ctx.send("Level must be 0-6 or `none`.")
+    except ValueError:
+        return await ctx.send("Level must be 0-6 or `none`.")
+    command_overrides[cmd] = lvl
+    save_command_perms()
+    await ctx.send(f"Permission for `{cmd}` set to **Perm {lvl}**.")
+
+@bot.command(name="commands")
+async def commands_command(ctx):
+    if not has_staff_permission(ctx.author):
+        return await cmd_fail(ctx)
+    emb = discord.Embed(title=f"✦ Ticket Commands — {BRAND_NAME}", color=THEME_COLOR)
+    emb.add_field(name="Ticket tools", value="`+claim` `+close` `+rename <name>` `+add <user>` `+remove <user>`", inline=False)
+    emb.add_field(name="Note", value="Panels auto-post on bot startup.", inline=False)
+    emb.set_footer(text=FOOTER_TEXT)
+    await ctx.send(embed=emb)
+
 @bot.command()
 async def ban(ctx, *, args=None):
     if str(ctx.author.id) not in BAN_COMMAND_USERS:
@@ -1670,7 +2140,7 @@ async def unbl(ctx, user_id=None):
 @bot.command()
 async def blist(ctx):
     if not has_perm(ctx.author, get_cmd_perm("blist")):
-        return
+        return await cmd_fail(ctx)
     if not blacklist:
         return await empty_result(ctx, "No blacklisted users.")
     lines = []
