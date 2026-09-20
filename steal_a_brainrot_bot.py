@@ -175,6 +175,27 @@ ALL_STAFF_ROLES = [
     TICKET_TEAM, TICKET_TEAM_T1,
 ]
 
+# ==================== ANTI-RAID / ANTI-NUKE ====================
+ANTI_NUKE_ENABLED = True
+# Max actions of each type in the time window before punishment
+ANTI_NUKE_WINDOW = 12          # seconds
+ANTI_NUKE_THRESHOLDS = {
+    "ban": 3,                  # 3+ bans in window
+    "kick": 4,                 # 4+ kicks
+    "channel_delete": 2,       # 2+ channel deletes
+    "role_delete": 2,          # 2+ role deletes
+    "channel_create": 5,       # spam channel create
+    "role_create": 5,
+    "webhook": 3,
+}
+# Users/roles immune to anti-nuke (special users + creator always immune)
+ANTI_NUKE_IMMUNE_ROLES = [
+    "1550995708793065563",  # creator
+    "1550995712496631818",  # founder
+    "1550995714828406824",  # guardian
+    "1550995725746438254",  # owners
+]
+
 BLACKLISTED_WORDS = [
     "nigger", "nigga", "faggot", "fag", "tranny", "retard", "retarded",
     "nazi", "hitler", "kike", "chink", "spic", "coon", "beaner",
@@ -227,6 +248,10 @@ _temprole_tasks = {}
 command_overrides = load_json(COMMAND_PERMS_FILE, {})
 linked_alts = load_json(LINKED_ALTS_FILE, {})
 config = load_json(CONFIG_FILE, {"ticketCounter": 0})
+
+# Anti-nuke action tracker: {guild_id: {user_id: {action: [timestamps...]}}}
+_antinuke_actions = {}
+_antinuke_punished = set()  # user ids currently being punished (avoid loops)
 
 def save_config():
     save_json(CONFIG_FILE, config)
@@ -423,10 +448,16 @@ def clean_channel_name(name):
     return name[:90] if name else "ticket"
 
 def get_staff_mentions(ticket_type="support"):
-    if ticket_type in ("support", "scammer"):
-        return f"<@&{TICKET_TEAM_T1}>"
-    if ticket_type in ("ads", "rolls", "reward"):
-        roles = ["1550995708793065563", "1550995725746438254", "1550995734281588776"]
+    """Who gets pinged when a ticket opens."""
+    # Creator, Server Manager, Supervisor, Ticket Team
+    CREATOR = "1550995708793065563"
+    SERVER_MANAGER = "1550995737398083645"
+    SUPERVISOR = "1550995734281588776"
+    core = [CREATOR, SERVER_MANAGER, SUPERVISOR, TICKET_TEAM]
+    if ticket_type in ("support", "scammer", "reward"):
+        return " ".join(f"<@&{r}>" for r in dict.fromkeys(core))
+    if ticket_type in ("ads", "rolls"):
+        roles = [CREATOR, "1550995725746438254", SUPERVISOR]  # creator, owners, supervisor
         return " ".join(f"<@&{r}>" for r in dict.fromkeys(roles))
     return ""
 
@@ -509,6 +540,7 @@ class MiddlemanModal(discord.ui.Modal, title="MiddleMan Request"):
         self.add_item(self.tip)
 
     async def on_submit(self, interaction):
+        await interaction.response.defer(ephemeral=True)
         await create_middleman_ticket(interaction, self.trade_type, self.trade_with.value, self.trade_details.value, self.tip.value)
 
 class MiddlemanSelect(Select):
@@ -664,7 +696,18 @@ async def create_index_ticket(interaction, base_key):
         overwrites[role] = discord.PermissionOverwrite(view_channel=True, send_messages=True, attach_files=True, read_message_history=True, manage_messages=True)
 
     category = guild.get_channel(INDEX_CATEGORY_ID)
-    channel = await guild.create_text_channel(name=channel_name, category=category, topic=f"ticket-{member.id}", overwrites=overwrites)
+    if category is None or not isinstance(category, discord.CategoryChannel):
+        return await interaction.followup.send(
+            f"❌ Index category not found (ID: `{INDEX_CATEGORY_ID}`). Check the category ID and bot permissions.",
+            ephemeral=True
+        )
+
+    channel = await guild.create_text_channel(
+        name=channel_name,
+        category=category,
+        topic=f"ticket-{member.id}",
+        overwrites=overwrites
+    )
 
     embed = discord.Embed(
         title=f"{emoji} Index Request: {display_name}",
@@ -672,6 +715,7 @@ async def create_index_ticket(interaction, base_key):
         color=THEME_COLOR
     )
     embed.set_footer(text=FOOTER_TEXT)
+    # Ping the specific index role for this base
     await channel.send(content=f"<@&{role_id}>", embed=embed, view=TicketButtons())
     await interaction.followup.send(f"Index ticket created: {channel.mention}", ephemeral=True)
 
@@ -701,7 +745,18 @@ async def create_middleman_ticket(interaction, trade_type, trade_with, trade_det
         overwrites[role] = discord.PermissionOverwrite(view_channel=True, send_messages=True, attach_files=True, read_message_history=True, manage_messages=True)
 
     category = guild.get_channel(MM_CATEGORY_ID)
-    channel = await guild.create_text_channel(name=channel_name, category=category, topic=f"ticket-{member.id}", overwrites=overwrites)
+    if category is None or not isinstance(category, discord.CategoryChannel):
+        return await interaction.followup.send(
+            f"❌ Middleman category not found (ID: `{MM_CATEGORY_ID}`). Check the category ID and bot permissions.",
+            ephemeral=True
+        )
+
+    channel = await guild.create_text_channel(
+        name=channel_name,
+        category=category,
+        topic=f"ticket-{member.id}",
+        overwrites=overwrites
+    )
 
     embed = discord.Embed(
         title=f"{emoji} MiddleMan Request: {display_name}",
@@ -709,6 +764,7 @@ async def create_middleman_ticket(interaction, trade_type, trade_with, trade_det
         color=THEME_COLOR
     )
     embed.set_footer(text=FOOTER_TEXT)
+    # Ping the specific middleman role for this trade type
     await channel.send(content=f"<@&{role_id}>", embed=embed, view=TicketButtons())
     await interaction.followup.send(f"MiddleMan ticket created: {channel.mention}", ephemeral=True)
 
@@ -1190,7 +1246,114 @@ async def post_panels():
     except Exception as e:
         print(f"Failed to post staff panel: {e}")
 
+
+# ==================== ANTI-NUKE HELPERS ====================
+def _antinuke_is_immune(member) -> bool:
+    if not member:
+        return True
+    if str(member.id) in SPECIAL_USERS:
+        return True
+    if getattr(member, "bot", False):
+        return True
+    if member.guild and member.id == member.guild.owner_id:
+        return True
+    try:
+        if any(str(r.id) in ANTI_NUKE_IMMUNE_ROLES for r in member.roles):
+            return True
+    except Exception:
+        pass
+    return False
+
+def _antinuke_record(guild_id: int, user_id: int, action: str) -> int:
+    """Record an action and return count in the current window."""
+    now = datetime.now(timezone.utc).timestamp()
+    g = _antinuke_actions.setdefault(guild_id, {})
+    u = g.setdefault(user_id, {})
+    times = u.setdefault(action, [])
+    # Drop old timestamps
+    cutoff = now - ANTI_NUKE_WINDOW
+    times[:] = [t for t in times if t >= cutoff]
+    times.append(now)
+    return len(times)
+
+async def _antinuke_punish(guild: discord.Guild, member: discord.Member, action: str, count: int):
+    """Strip dangerous roles and log. Tries timeout + remove all roles above everyone."""
+    if not ANTI_NUKE_ENABLED or not member or not guild:
+        return
+    key = f"{guild.id}:{member.id}"
+    if key in _antinuke_punished:
+        return
+    _antinuke_punished.add(key)
+    try:
+        # Timeout 1 hour if possible
+        try:
+            await member.timeout(datetime.now(timezone.utc) + timedelta(hours=1), reason=f"Anti-nuke: mass {action}")
+        except Exception:
+            pass
+        # Remove all roles the bot can remove (except @everyone)
+        removable = [
+            r for r in member.roles
+            if r != guild.default_role
+            and not r.managed
+            and r < guild.me.top_role
+        ]
+        if removable:
+            try:
+                await member.remove_roles(*removable, reason=f"Anti-nuke: mass {action} ({count} in {ANTI_NUKE_WINDOW}s)")
+            except Exception:
+                for r in removable:
+                    try:
+                        await member.remove_roles(r, reason=f"Anti-nuke: mass {action}")
+                    except Exception:
+                        pass
+        # Log
+        emb = discord.Embed(
+            title="🚨 ANTI-NUKE TRIGGERED — STEAL A BRAINROT",
+            description=(
+                f"**User:** {member.mention} (`{member.id}`)\n"
+                f"**Action:** mass `{action}`\n"
+                f"**Count:** `{count}` in `{ANTI_NUKE_WINDOW}s`\n"
+                f"**Response:** roles stripped + 1h timeout\n\n"
+                f"Review this account immediately."
+            ),
+            color=0xFF0000,
+            timestamp=datetime.now(timezone.utc),
+        )
+        emb.set_footer(text=FOOTER_TEXT)
+        # Ping creators / owners
+        ping = " ".join(f"<@&{r}>" for r in ["1550995708793065563", "1550995725746438254"])
+        ch = bot.get_channel(LOG_CHANNEL_ID)
+        if ch:
+            try:
+                await ch.send(content=ping, embed=emb)
+            except Exception:
+                pass
+        print(f"[ANTI-NUKE] Punished {member} for mass {action} ({count})")
+    finally:
+        # Allow future triggers after a short delay
+        await asyncio.sleep(5)
+        _antinuke_punished.discard(key)
+
+async def _antinuke_check(guild: discord.Guild, user: discord.abc.User, action: str):
+    if not ANTI_NUKE_ENABLED or not guild or not user:
+        return
+    threshold = ANTI_NUKE_THRESHOLDS.get(action)
+    if not threshold:
+        return
+    member = guild.get_member(user.id)
+    if member is None:
+        try:
+            member = await guild.fetch_member(user.id)
+        except Exception:
+            return
+    if _antinuke_is_immune(member):
+        return
+    count = _antinuke_record(guild.id, user.id, action)
+    if count >= threshold:
+        await _antinuke_punish(guild, member, action, count)
+
 # ==================== EVENTS ====================
+
 @bot.event
 async def on_ready():
     print(f"Logged in as {bot.user} (ID: {bot.user.id})")
@@ -1214,6 +1377,77 @@ async def on_ready():
 
     # Auto-post all panels
     await post_panels()
+
+@bot.event
+async def on_member_ban(guild, user):
+    try:
+        # Find who banned via audit log
+        await asyncio.sleep(0.6)
+        async for entry in guild.audit_logs(limit=3, action=discord.AuditLogAction.ban):
+            if entry.target and entry.target.id == user.id:
+                await _antinuke_check(guild, entry.user, "ban")
+                break
+    except Exception as e:
+        print(f"anti-nuke ban track error: {e}")
+
+@bot.event
+async def on_guild_channel_delete(channel):
+    try:
+        guild = channel.guild
+        await asyncio.sleep(0.6)
+        async for entry in guild.audit_logs(limit=3, action=discord.AuditLogAction.channel_delete):
+            if entry.target and getattr(entry.target, "id", None) == channel.id:
+                await _antinuke_check(guild, entry.user, "channel_delete")
+                break
+    except Exception as e:
+        print(f"anti-nuke channel_delete error: {e}")
+
+@bot.event
+async def on_guild_channel_create(channel):
+    try:
+        guild = channel.guild
+        await asyncio.sleep(0.6)
+        async for entry in guild.audit_logs(limit=3, action=discord.AuditLogAction.channel_create):
+            if entry.target and getattr(entry.target, "id", None) == channel.id:
+                await _antinuke_check(guild, entry.user, "channel_create")
+                break
+    except Exception as e:
+        print(f"anti-nuke channel_create error: {e}")
+
+@bot.event
+async def on_guild_role_delete(role):
+    try:
+        guild = role.guild
+        await asyncio.sleep(0.6)
+        async for entry in guild.audit_logs(limit=3, action=discord.AuditLogAction.role_delete):
+            if entry.target and getattr(entry.target, "id", None) == role.id:
+                await _antinuke_check(guild, entry.user, "role_delete")
+                break
+    except Exception as e:
+        print(f"anti-nuke role_delete error: {e}")
+
+@bot.event
+async def on_guild_role_create(role):
+    try:
+        guild = role.guild
+        await asyncio.sleep(0.6)
+        async for entry in guild.audit_logs(limit=3, action=discord.AuditLogAction.role_create):
+            if entry.target and getattr(entry.target, "id", None) == role.id:
+                await _antinuke_check(guild, entry.user, "role_create")
+                break
+    except Exception as e:
+        print(f"anti-nuke role_create error: {e}")
+
+@bot.event
+async def on_webhooks_update(channel):
+    try:
+        guild = channel.guild
+        await asyncio.sleep(0.6)
+        async for entry in guild.audit_logs(limit=3, action=discord.AuditLogAction.webhook_create):
+            await _antinuke_check(guild, entry.user, "webhook")
+            break
+    except Exception as e:
+        print(f"anti-nuke webhook error: {e}")
 
 @bot.event
 async def on_message(message):
@@ -1262,6 +1496,16 @@ async def on_member_join(member):
 
 @bot.event
 async def on_member_remove(member):
+    # Anti-nuke: detect kicks via audit log
+    try:
+        await asyncio.sleep(0.6)
+        async for entry in member.guild.audit_logs(limit=3, action=discord.AuditLogAction.kick):
+            if entry.target and entry.target.id == member.id:
+                await _antinuke_check(member.guild, entry.user, "kick")
+                break
+    except Exception as e:
+        print(f"anti-nuke kick track error: {e}")
+    # Leave log
     try:
         ch = bot.get_channel(LEAVES_CHANNEL_ID) or await bot.fetch_channel(LEAVES_CHANNEL_ID)
         emb = discord.Embed(title="✦ Member Left", description=f"👋 **{member}** has left **{BRAND_NAME}**.", color=THEME_COLOR, timestamp=datetime.now(timezone.utc))
@@ -1334,6 +1578,28 @@ async def help(ctx):
     emb.set_footer(text=FOOTER_TEXT)
     await ctx.send(embed=emb)
 
+@bot.command(name="antinuke")
+async def antinuke_cmd(ctx, mode: str = None):
+    """+antinuke [on|off|status] — toggle or view anti-nuke (Perm 6 / Special)."""
+    global ANTI_NUKE_ENABLED
+    if str(ctx.author.id) not in SPECIAL_USERS and not has_perm(ctx.author, 6):
+        return await cmd_fail(ctx)
+    if mode is None or mode.lower() in ("status", "info"):
+        lines = [f"**Enabled:** `{ANTI_NUKE_ENABLED}`", f"**Window:** `{ANTI_NUKE_WINDOW}s`", "", "**Thresholds:**"]
+        for k, v in ANTI_NUKE_THRESHOLDS.items():
+            lines.append(f"• `{k}` → {v}")
+        emb = discord.Embed(title=f"✦ Anti-Nuke — {BRAND_NAME}", description="\n".join(lines), color=THEME_COLOR)
+        emb.set_footer(text=FOOTER_TEXT)
+        return await ctx.send(embed=emb)
+    m = mode.lower()
+    if m in ("on", "enable", "true", "1"):
+        ANTI_NUKE_ENABLED = True
+        return await ctx.send(embed=discord.Embed(description="✅ Anti-nuke **enabled**.", color=THEME_COLOR))
+    if m in ("off", "disable", "false", "0"):
+        ANTI_NUKE_ENABLED = False
+        return await ctx.send(embed=discord.Embed(description="⚠️ Anti-nuke **disabled**.", color=0xFFAA00))
+    return await cmd_usage(ctx, "`+antinuke [on|off|status]`")
+
 @bot.command()
 async def perms(ctx):
     cache = resolve_role_ids(ctx.guild)
@@ -1356,8 +1622,15 @@ async def snipe(ctx):
     await ctx.send(embed=emb)
 
 @bot.command(aliases=["warns"])
-async def sanctions(ctx, target: str = None):
-    user = await get_target(ctx, target) or ctx.author
+async def sanctions(ctx, *, target: str = None):
+    user = None
+    if ctx.message.mentions:
+        user = ctx.message.mentions[0]
+    elif ctx.message.reference:
+        user = await get_target(ctx, None)
+    elif target:
+        user = await get_target(ctx, target)
+    user = user or ctx.author
     uid = str(user.id)
     lst = sanctions_data.get(uid, [])
     if not lst:
@@ -1408,21 +1681,20 @@ async def warn(ctx, *, args=None):
 async def tempmute(ctx, *, args=None):
     if not has_perm(ctx.author, get_cmd_perm("tempmute")):
         return await cmd_fail(ctx)
-    if not args:
-        return await cmd_usage(ctx, "`+tempmute <@member> <duration> [reason]`")
     user = None
-    rest = args
+    rest = args or ""
     if ctx.message.mentions:
         user = ctx.message.mentions[0]
         for m in ctx.message.mentions:
             rest = rest.replace(f"<@{m.id}>", "").replace(f"<@!{m.id}>", "")
+    elif ctx.message.reference:
+        user = await get_target(ctx, None)
     tokens = rest.strip().split()
-    if not tokens:
-        return await cmd_usage(ctx, "`+tempmute <@member> <duration> [reason]`")
-    if user is None and tokens[0].isdigit():
+    if user is None and tokens and tokens[0].isdigit():
         user = await get_target(ctx, tokens[0])
         tokens = tokens[1:]
     duration = None
+    reason = "No reason"
     for i, tok in enumerate(tokens):
         if parse_duration(tok):
             duration = tok
@@ -1469,7 +1741,7 @@ async def unmute(ctx, *, target: str = None):
 
 @bot.command()
 async def clear(ctx, *, args: str = None):
-    """+clear [amount] [@member]
+    """+clear [amount] [@member] — silent delete, no bot reply.
     Examples:
       +clear
       +clear 20
@@ -1482,45 +1754,53 @@ async def clear(ctx, *, args: str = None):
     amount = 10
     target_user = None
 
-    # Prefer mentions
     if ctx.message.mentions:
         target_user = ctx.message.mentions[0]
 
     if args:
         tokens = args.split()
-        # Find a number for amount
         for tok in tokens:
             if tok.isdigit():
                 amount = int(tok)
                 break
-        # If no mention yet, try resolve first non-digit token as user
         if target_user is None:
             for tok in tokens:
                 if not tok.isdigit() and not tok.startswith("<@"):
                     target_user = await get_target(ctx, tok)
                     if target_user:
                         break
+    # Reply-to also targets that user
+    if target_user is None and ctx.message.reference:
+        target_user = await get_target(ctx, None)
 
     if amount < 1 or amount > 100:
-        return await ctx.send("Amount must be between 1 and 100.")
+        try:
+            await ctx.message.delete()
+        except Exception:
+            pass
+        return
 
     clearing_channels.add(ctx.channel.id)
     try:
+        # Delete the command message first
+        try:
+            await ctx.message.delete()
+        except Exception:
+            pass
+
         def check(m):
             if target_user:
                 return m.author.id == target_user.id
             return True
-        deleted = await ctx.channel.purge(limit=amount + 1, check=check)
-        count = max(0, len(deleted) - 1)
-        desc = f"Deleted **{count}** message(s)."
-        if target_user:
-            desc = f"Deleted **{count}** message(s) from {target_user.mention}."
-        msg = await ctx.send(embed=discord.Embed(description=desc, color=THEME_COLOR))
-        await msg.delete(delay=3)
-    except Exception as e:
-        await ctx.send(f"Failed: {e}")
+
+        # Purge up to `amount` matching messages (command already deleted)
+        await ctx.channel.purge(limit=amount, check=check)
+        # No bot response — stays silent
+    except Exception:
+        pass
     finally:
         clearing_channels.discard(ctx.channel.id)
+
 
 @bot.command()
 async def lock(ctx):
@@ -1701,8 +1981,15 @@ async def derank(ctx, *, target: str = None):
         await ctx.send(f"Failed: {e}")
 
 @bot.command()
-async def userinfo(ctx, target=None):
-    user = await get_target(ctx, target) or ctx.author
+async def userinfo(ctx, *, target: str = None):
+    user = None
+    if ctx.message.mentions:
+        user = ctx.message.mentions[0]
+    elif ctx.message.reference:
+        user = await get_target(ctx, None)
+    elif target:
+        user = await get_target(ctx, target)
+    user = user or ctx.author
     member = ctx.guild.get_member(user.id)
     emb = discord.Embed(title=f"✦ User Info — {BRAND_NAME}", color=THEME_COLOR)
     emb.set_author(name=str(user), icon_url=user.display_avatar.url)
@@ -2010,7 +2297,7 @@ async def commands_command(ctx):
 @bot.command()
 async def ban(ctx, *, args=None):
     if str(ctx.author.id) not in BAN_COMMAND_USERS:
-        return
+        return await cmd_fail(ctx)
     user = None
     reason = "No reason"
     if ctx.message.mentions:
@@ -2020,13 +2307,17 @@ async def ban(ctx, *, args=None):
             for m in ctx.message.mentions:
                 reason = reason.replace(f"<@{m.id}>", "").replace(f"<@!{m.id}>", "")
             reason = reason.strip() or "No reason"
+    elif ctx.message.reference:
+        user = await get_target(ctx, None)
+        if args:
+            reason = args.strip() or "No reason"
     elif args:
         parts = args.split(None, 1)
         user = await get_target(ctx, parts[0])
         if user and len(parts) > 1:
             reason = parts[1]
     if not user:
-        return await cmd_fail(ctx)
+        return await cmd_usage(ctx, "`+ban <@member> [reason]`")
     try:
         await ctx.guild.ban(user, reason=reason)
     except Exception:
@@ -2056,7 +2347,7 @@ async def unban(ctx, user_id=None):
 @bot.command()
 async def kick(ctx, *, args=None):
     if str(ctx.author.id) not in KICK_COMMAND_USERS:
-        return
+        return await cmd_fail(ctx)
     user = None
     reason = "No reason"
     if ctx.message.mentions:
@@ -2066,13 +2357,17 @@ async def kick(ctx, *, args=None):
             for m in ctx.message.mentions:
                 reason = reason.replace(f"<@{m.id}>", "").replace(f"<@!{m.id}>", "")
             reason = reason.strip() or "No reason"
+    elif ctx.message.reference:
+        user = await get_target(ctx, None)
+        if args:
+            reason = args.strip() or "No reason"
     elif args:
         parts = args.split(None, 1)
         user = await get_target(ctx, parts[0])
         if user and len(parts) > 1:
             reason = parts[1]
     if not user:
-        return await cmd_fail(ctx)
+        return await cmd_usage(ctx, "`+kick <@member> [reason]`")
     member = await get_member(ctx.guild, user)
     if not member:
         return await cmd_fail(ctx)
@@ -2087,7 +2382,7 @@ async def kick(ctx, *, args=None):
 @bot.command()
 async def bl(ctx, *, args=None):
     if str(ctx.author.id) not in BL_COMMAND_USERS:
-        return
+        return await cmd_fail(ctx)
     user = None
     reason = "No reason"
     if ctx.message.mentions:
@@ -2097,13 +2392,17 @@ async def bl(ctx, *, args=None):
             for m in ctx.message.mentions:
                 reason = reason.replace(f"<@{m.id}>", "").replace(f"<@!{m.id}>", "")
             reason = reason.strip() or "No reason"
+    elif ctx.message.reference:
+        user = await get_target(ctx, None)
+        if args:
+            reason = args.strip() or "No reason"
     elif args:
         parts = args.split(None, 1)
         user = await get_target(ctx, parts[0])
         if user and len(parts) > 1:
             reason = parts[1]
     if not user:
-        return await cmd_fail(ctx)
+        return await cmd_usage(ctx, "`+bl <@member> [reason]`")
     uid = str(user.id)
     if uid not in blacklist:
         blacklist.append(uid)
