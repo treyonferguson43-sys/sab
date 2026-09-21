@@ -16,6 +16,8 @@ from http.server import BaseHTTPRequestHandler, HTTPServer
 
 TOKEN = os.environ.get("DISCORD_BOT_TOKEN") or os.environ.get("TOKEN")
 PREFIX = "+"
+BASE_DIR = os.path.dirname(os.path.abspath(__file__))
+BANNERS_DIR = os.path.join(BASE_DIR, "banners")
 
 THEME_COLOR = 0xFFD700
 FOOTER_TEXT = "STEAL A BRAINROT • Server Services"
@@ -107,9 +109,14 @@ SPECIAL_USERS = [
     "1391635894045380619",
     "1540025216657526796",
 ]
-BAN_COMMAND_USERS = SPECIAL_USERS[:]
+# Full power (ban / unban / kick / bl / unbl)
+BAN_COMMAND_USERS = SPECIAL_USERS[:]          # + the limited user below
 KICK_COMMAND_USERS = SPECIAL_USERS[:]
-BL_COMMAND_USERS = SPECIAL_USERS[:]
+BL_COMMAND_USERS = SPECIAL_USERS[:]           # only full special users
+
+# Limited user: can only ban, unban, kick (no blacklist)
+BAN_COMMAND_USERS.append("1495975678863085670")
+KICK_COMMAND_USERS.append("1495975678863085670")
 
 # ==================== ROLE HIERARCHY ====================
 ROLES = {
@@ -1264,8 +1271,10 @@ async def post_panels():
             ),
             color=THEME_COLOR
         )
+        embed.set_image(url="attachment://server_services.jpg")
         embed.set_footer(text=FOOTER_TEXT)
-        await ch.send(embed=embed, view=TicketView())
+        file = discord.File(os.path.join(BANNERS_DIR, "server_services.jpg"), filename="server_services.jpg")
+        await ch.send(embed=embed, view=TicketView(), file=file)
         print(f"Support panel posted in {PANEL_CHANNEL_SUPPORT}")
     except Exception as e:
         print(f"Failed to post support panel: {e}")
@@ -1289,8 +1298,10 @@ async def post_panels():
             ),
             color=THEME_COLOR
         )
+        embed.set_image(url="attachment://index_department.jpg")
         embed.set_footer(text=FOOTER_TEXT)
-        await ch.send(embed=embed, view=IndexView())
+        file = discord.File(os.path.join(BANNERS_DIR, "index_department.jpg"), filename="index_department.jpg")
+        await ch.send(embed=embed, view=IndexView(), file=file)
         print(f"Index panel posted in {PANEL_CHANNEL_INDEX}")
     except Exception as e:
         print(f"Failed to post index panel: {e}")
@@ -1313,8 +1324,10 @@ async def post_panels():
             ),
             color=THEME_COLOR
         )
+        embed.set_image(url="attachment://middleman.jpg")
         embed.set_footer(text=FOOTER_TEXT)
-        await ch.send(embed=embed, view=MiddlemanView())
+        file = discord.File(os.path.join(BANNERS_DIR, "middleman.jpg"), filename="middleman.jpg")
+        await ch.send(embed=embed, view=MiddlemanView(), file=file)
         print(f"Middleman panel posted in {PANEL_CHANNEL_MM}")
     except Exception as e:
         print(f"Failed to post middleman panel: {e}")
@@ -1336,8 +1349,10 @@ async def post_panels():
             ),
             color=THEME_COLOR
         )
+        embed.set_image(url="attachment://staff_applications.jpg")
         embed.set_footer(text=FOOTER_TEXT)
-        await ch.send(embed=embed, view=StaffPanelView())
+        file = discord.File(os.path.join(BANNERS_DIR, "staff_applications.jpg"), filename="staff_applications.jpg")
+        await ch.send(embed=embed, view=StaffPanelView(), file=file)
         print(f"Staff panel posted in {PANEL_CHANNEL_STAFF}")
     except Exception as e:
         print(f"Failed to post staff panel: {e}")
@@ -1356,9 +1371,10 @@ async def post_panels():
             ),
             color=THEME_COLOR
         )
-        embed.set_image(url=REACTION_PANEL_GIF)
+        embed.set_image(url="attachment://reaction_roles.jpg")
         embed.set_footer(text=FOOTER_TEXT)
-        await ch.send(embed=embed, view=ReactionRoleView())
+        file = discord.File(os.path.join(BANNERS_DIR, "reaction_roles.jpg"), filename="reaction_roles.jpg")
+        await ch.send(embed=embed, view=ReactionRoleView(), file=file)
         print(f"Reaction roles panel posted in {PANEL_CHANNEL_REACTION}")
     except Exception as e:
         print(f"Failed to post reaction roles panel: {e}")
@@ -1604,11 +1620,18 @@ async def on_member_join(member):
         return
     try:
         ch = bot.get_channel(WELCOME_CHANNEL_ID) or await bot.fetch_channel(WELCOME_CHANNEL_ID)
-        emb = discord.Embed(title="✦ New Member Joined!", description=f"👏 Welcome {member.mention} to **{BRAND_NAME}**!", color=THEME_COLOR, timestamp=datetime.now(timezone.utc))
+        emb = discord.Embed(
+            title="✦ New Member Joined!",
+            description=f"👏 Welcome {member.mention} to **{BRAND_NAME}**!",
+            color=THEME_COLOR,
+            timestamp=datetime.now(timezone.utc)
+        )
         emb.add_field(name="Account Created", value=discord.utils.format_dt(member.created_at, "R"), inline=True)
         emb.set_thumbnail(url=member.display_avatar.url)
+        emb.set_image(url="attachment://welcome.jpg")
         emb.set_footer(text=FOOTER_TEXT)
-        await ch.send(embed=emb)
+        file = discord.File(os.path.join(BANNERS_DIR, "welcome.jpg"), filename="welcome.jpg")
+        await ch.send(embed=emb, file=file)
     except Exception as e:
         print(f"Welcome failed: {e}")
 
@@ -1626,10 +1649,17 @@ async def on_member_remove(member):
     # Leave log
     try:
         ch = bot.get_channel(LEAVES_CHANNEL_ID) or await bot.fetch_channel(LEAVES_CHANNEL_ID)
-        emb = discord.Embed(title="✦ Member Left", description=f"👋 **{member}** has left **{BRAND_NAME}**.", color=THEME_COLOR, timestamp=datetime.now(timezone.utc))
+        emb = discord.Embed(
+            title="✦ Member Left",
+            description=f"👋 **{member}** has left **{BRAND_NAME}**.",
+            color=THEME_COLOR,
+            timestamp=datetime.now(timezone.utc)
+        )
         emb.set_thumbnail(url=member.display_avatar.url)
+        emb.set_image(url="attachment://leaves.jpg")
         emb.set_footer(text=FOOTER_TEXT)
-        await ch.send(embed=emb)
+        file = discord.File(os.path.join(BANNERS_DIR, "leaves.jpg"), filename="leaves.jpg")
+        await ch.send(embed=emb, file=file)
     except Exception as e:
         print(f"Leave failed: {e}")
 
