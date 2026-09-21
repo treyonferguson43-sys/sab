@@ -1,0 +1,13 @@
+sab/
+├── .gitignore
+├── requirements.txt
+├── steal_a_brainrot_bot.py
+└── banners/
+    ├── server_services.jpg
+    ├── index_department.jpg
+    ├── middleman.jpg
+    ├── staff_applications.jpg
+    ├── reaction_roles.jpg
+    ├── welcome.jpg
+    ├── leaves.jpg
+    └── main_banner.jpg
