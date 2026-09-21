@@ -33,6 +33,60 @@ PANEL_CHANNEL_SUPPORT = 1550996022979858515   # support / scammer / reward / ads
 PANEL_CHANNEL_INDEX = 1550996020572323931     # index panel
 PANEL_CHANNEL_MM = 1550996014419288065        # middleman panel
 PANEL_CHANNEL_STAFF = 1550996017720074374     # staff applications panel
+PANEL_CHANNEL_REACTION = 1551270491665338399  # reaction roles panel
+
+# ==================== REACTION ROLES ====================
+REACTION_ROLES = [
+    {
+        "id": 1550995943028166747,
+        "label": "Important Ping",
+        "emoji": "🚨",
+        "gif": "https://media.giphy.com/media/xT9IgG50Fb7Mi0prBC/giphy.gif",
+    },
+    {
+        "id": 1550995945640951831,
+        "label": "Shop Ping",
+        "emoji": "🛒",
+        "gif": "https://media.giphy.com/media/3oEjI6SIIHBdRxXI40/giphy.gif",
+    },
+    {
+        "id": 1550995948589551746,
+        "label": "Poll Ping",
+        "emoji": "📊",
+        "gif": "https://media.giphy.com/media/l0HlNQ03J5JxX6lva/giphy.gif",
+    },
+    {
+        "id": 1550995950997348396,
+        "label": "Announcement Ping",
+        "emoji": "📢",
+        "gif": "https://media.giphy.com/media/3o6Zt6ML6BklcajjsA/giphy.gif",
+    },
+    {
+        "id": 1550995954415444068,
+        "label": "Dead Chat Ping",
+        "emoji": "💤",
+        "gif": "https://media.giphy.com/media/3o7aCTPPm4OHfRLSH6/giphy.gif",
+    },
+    {
+        "id": 1551571055129268244,
+        "label": "Trade Ping",
+        "emoji": "💱",
+        "gif": "https://media.giphy.com/media/3o7btPCcdNniyf0ArS/giphy.gif",
+    },
+    {
+        "id": 1551571055166885948,
+        "label": "Leaks Ping",
+        "emoji": "🔓",
+        "gif": "https://media.giphy.com/media/3o6ZtpxSZbQRRnwCKQ/giphy.gif",
+    },
+    {
+        "id": 1551571546789781594,
+        "label": "SAB",
+        "emoji": "🧠",
+        "gif": "https://media.giphy.com/media/l0MYt5jPR6QX5pnqM/giphy.gif",
+    },
+]
+REACTION_PANEL_GIF = "https://media.giphy.com/media/3o7btPCcdNniyf0ArS/giphy.gif"
 
 # ==================== CATEGORIES ====================
 SUPPORT_CATEGORY_ID = 1551278227417202790
@@ -580,6 +634,48 @@ class StaffPanelView(View):
     def __init__(self):
         super().__init__(timeout=None)
         self.add_item(StaffPanelSelect())
+
+class ReactionRoleButton(Button):
+    def __init__(self, role_id: int, label: str, emoji: str, gif: str = None):
+        super().__init__(
+            label=label,
+            emoji=emoji,
+            style=discord.ButtonStyle.secondary,
+            custom_id=f"rr_{role_id}",
+        )
+        self.role_id = role_id
+        self.gif = gif
+
+    async def callback(self, interaction: discord.Interaction):
+        role = interaction.guild.get_role(self.role_id) if interaction.guild else None
+        if role is None:
+            return await interaction.response.send_message("Role not found on this server.", ephemeral=True)
+        member = interaction.user
+        try:
+            if role in member.roles:
+                await member.remove_roles(role, reason="Reaction role toggle")
+                text = f"✅ Removed **{role.name}**"
+            else:
+                await member.add_roles(role, reason="Reaction role toggle")
+                text = f"✅ Added **{role.name}**"
+
+            if self.gif:
+                emb = discord.Embed(description=text, color=THEME_COLOR)
+                emb.set_image(url=self.gif)
+                emb.set_footer(text=FOOTER_TEXT)
+                await interaction.response.send_message(embed=emb, ephemeral=True)
+            else:
+                await interaction.response.send_message(text, ephemeral=True)
+        except discord.Forbidden:
+            await interaction.response.send_message("❌ I don't have permission to manage that role.", ephemeral=True)
+        except Exception as e:
+            await interaction.response.send_message(f"❌ Failed: {e}", ephemeral=True)
+
+class ReactionRoleView(View):
+    def __init__(self):
+        super().__init__(timeout=None)
+        for r in REACTION_ROLES:
+            self.add_item(ReactionRoleButton(r["id"], r["label"], r["emoji"], r.get("gif")))
 
 class TicketButtons(View):
     def __init__(self):
@@ -1246,6 +1342,27 @@ async def post_panels():
     except Exception as e:
         print(f"Failed to post staff panel: {e}")
 
+    # Reaction roles panel
+    try:
+        ch = bot.get_channel(PANEL_CHANNEL_REACTION) or await bot.fetch_channel(PANEL_CHANNEL_REACTION)
+        await _clear_bot_messages(ch)
+        embed = discord.Embed(
+            title="✦ Reaction Roles — STEAL A BRAINROT",
+            description=(
+                "Click the buttons below to **toggle** notification roles.\n\n"
+                "Get pinged only for the things you care about!\n\n"
+                "🚨 **Important**  ·  🛒 **Shop**  ·  📊 **Poll**  ·  📢 **Announcement**\n"
+                "💤 **Dead Chat**  ·  💱 **Trade**  ·  🔓 **Leaks**  ·  🧠 **SAB**"
+            ),
+            color=THEME_COLOR
+        )
+        embed.set_image(url=REACTION_PANEL_GIF)
+        embed.set_footer(text=FOOTER_TEXT)
+        await ch.send(embed=embed, view=ReactionRoleView())
+        print(f"Reaction roles panel posted in {PANEL_CHANNEL_REACTION}")
+    except Exception as e:
+        print(f"Failed to post reaction roles panel: {e}")
+
 
 # ==================== ANTI-NUKE HELPERS ====================
 def _antinuke_is_immune(member) -> bool:
@@ -1374,6 +1491,7 @@ async def on_ready():
     bot.add_view(IndexView())
     bot.add_view(MiddlemanView())
     bot.add_view(StaffPanelView())
+    bot.add_view(ReactionRoleView())
 
     # Auto-post all panels
     await post_panels()
